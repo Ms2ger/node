@@ -8,8 +8,6 @@ const {
 const { setFlagsFromString } = require('v8');
 const { parentPort, workerData } = require('worker_threads');
 
-const { ResourceLoader } = require(workerData.wptRunner);
-const resource = new ResourceLoader(workerData.wptPath);
 
 if (workerData.needsGc) {
   // See https://github.com/nodejs/node/issues/16595#issuecomment-340288680
@@ -24,12 +22,6 @@ globalThis.GLOBAL = {
 };
 globalThis.require = require;
 
-// This is a mock for non-fetch tests that use fetch to resolve
-// a relative fixture file.
-// Actual Fetch API WPTs are executed in nodejs/undici.
-globalThis.fetch = function fetch(file) {
-  return resource.readAsFetch(workerData.testRelativePath, file);
-};
 
 if (workerData.initScript) {
   runInThisContext(workerData.initScript, {

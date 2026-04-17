@@ -12,6 +12,8 @@ const { Worker } = require('worker_threads');
 
 const workerPath = path.join(__dirname, 'wpt/worker.js');
 
+const wptpath = path.join(__dirname, '..', '..', '..', '..', 'tests', 'web-platform-tests');
+
 function getBrowserProperties() {
   const { node: version } = process.versions; // e.g. 18.13.0, 20.0.0-nightly202302078e6e215481
   const release = /^\d+\.\d+\.\d+$/.test(version);
@@ -93,8 +95,8 @@ class ReportResult {
 // Checkout https://github.com/web-platform-tests/wpt.fyi/tree/main/api#results-creation
 // for more details.
 class WPTReport {
-  constructor(path) {
-    this.filename = `report-${path.replaceAll('/', '-')}.json`;
+  constructor() {
+    this.filename = `report.json`;
     /** @type {Map<string, ReportResult>} */
     this.results = new Map();
     this.time_start = Date.now();
@@ -177,8 +179,8 @@ const harnessMock = {
 };
 
 class ResourceLoader {
-  constructor(path) {
-    this.path = path;
+  constructor() {
+    // this.path = path;
   }
 
   toRealFilePath(from, url) {
@@ -189,8 +191,8 @@ class ResourceLoader {
     );
     const base = path.dirname(from);
     return url.startsWith('/') ?
-      fixtures.path('wpt', url) :
-      fixtures.path('wpt', base, url);
+      path.join(wptpath, url) :
+      path.join(wptpath, base, url);
   }
 
   /**
@@ -230,67 +232,6 @@ class ResourceLoader {
   }
 }
 
-class StatusRule {
-  constructor(key, value, pattern) {
-    this.key = key;
-    this.requires = value.requires || [];
-    this.fail = value.fail;
-    this.skip = value.skip;
-    if (pattern) {
-      this.pattern = this.transformPattern(pattern);
-    }
-    // TODO(joyeecheung): implement this
-    this.scope = value.scope;
-    this.comment = value.comment;
-  }
-
-  /**
-   * Transform a filename pattern into a RegExp
-   * @param {string} pattern
-   * @returns {RegExp}
-   */
-  transformPattern(pattern) {
-    const result = path.normalize(pattern).replace(/[-/\\^$+?.()|[\]{}]/g, '\\$&');
-    return new RegExp(result.replace('*', '.*'));
-  }
-}
-
-class StatusRuleSet {
-  constructor() {
-    // We use two sets of rules to speed up matching
-    this.exactMatch = {};
-    this.patternMatch = [];
-  }
-
-  /**
-   * @param {object} rules
-   */
-  addRules(rules) {
-    for (const key of Object.keys(rules)) {
-      if (key.includes('*')) {
-        this.patternMatch.push(new StatusRule(key, rules[key], key));
-      } else {
-        const normalizedPath = path.normalize(key);
-        this.exactMatch[normalizedPath] = new StatusRule(key, rules[key]);
-      }
-    }
-  }
-
-  match(file) {
-    const result = [];
-    const exact = this.exactMatch[file];
-    if (exact) {
-      result.push(exact);
-    }
-    for (const item of this.patternMatch) {
-      if (item.pattern.test(file)) {
-        result.push(item);
-      }
-    }
-    return result;
-  }
-}
-
 // A specification of WPT test
 class WPTTestSpec {
   #content;
@@ -300,59 +241,22 @@ class WPTTestSpec {
    *   'html/webappapis/microtask-queuing'
    * @param {string} filename path of the test, relative to mod, e.g.
    *   'test.any.js'
-   * @param {StatusRule[]} rules
    * @param {string} variant test file variant
    */
-  constructor(mod, filename, rules, variant = '') {
-    this.module = mod;
+  constructor(filename, variant = '') {
+    // this.module = mod;
+    // FIXME do elsewhere
+    filename = filename.replace(".any.html", ".any.js");
     this.filename = filename;
+    console.log(`this.filename = ${filename} (${typeof filename})`);
     this.variant = variant;
-
-    this.requires = new Set();
-    this.failedTests = [];
-    this.flakyTests = [];
-    this.skipReasons = [];
-    for (const item of rules) {
-      if (item.requires.length) {
-        for (const req of item.requires) {
-          this.requires.add(req);
-        }
-      }
-      if (Array.isArray(item.fail?.expected)) {
-        this.failedTests.push(...item.fail.expected);
-      }
-      if (Array.isArray(item.fail?.flaky)) {
-        this.failedTests.push(...item.fail.flaky);
-        this.flakyTests.push(...item.fail.flaky);
-      }
-      if (item.skip) {
-        this.skipReasons.push(item.skip);
-      }
-    }
-
-    this.failedTests = [...new Set(this.failedTests)];
-    this.flakyTests = [...new Set(this.flakyTests)];
-    this.skipReasons = [...new Set(this.skipReasons)];
-  }
-
-  /**
-   * @param {string} mod
-   * @param {string} filename
-   * @param {StatusRule[]} rules
-   * @returns {ReturnType<WPTTestSpec['getMeta']>[]}
-   */
-  static from(mod, filename, rules) {
-    const spec = new WPTTestSpec(mod, filename, rules);
-    const meta = spec.getMeta();
-    return meta.variant?.map((variant) => new WPTTestSpec(mod, filename, rules, variant)) || [spec];
-  }
-
-  getRelativePath() {
-    return path.join(this.module, this.filename);
   }
 
   getAbsolutePath() {
-    return fixtures.path('wpt', this.getRelativePath());
+    let filename = this.filename.replace(/\?.*/, "");
+    let res = path.join(wptpath, filename);
+    console.log(`getAbsolutePath => ${res} (this.filename=${this.filename}, filename=${filename})`)
+    return res;
   }
 
   /**
@@ -376,7 +280,10 @@ class WPTTestSpec {
       const parts = match.match(/\/\/ META: ([^=]+?)=(.+)/);
       const key = parts[1];
       const value = parts[2];
-      if (key === 'script' || key === 'variant') {
+      if (key === 'variant') {
+        continue;
+      }
+      if (key === 'script') {
         if (result[key]) {
           result[key].push(value);
         } else {
@@ -390,114 +297,41 @@ class WPTTestSpec {
   }
 }
 
-const kIntlRequirement = {
-  none: 0,
-  small: 1,
-  full: 2,
-  // TODO(joyeecheung): we may need to deal with --with-intl=system-icu
-};
-
-class BuildRequirement {
-  constructor() {
-    this.currentIntl = kIntlRequirement.none;
-    if (process.config.variables.v8_enable_i18n_support === 0) {
-      this.currentIntl = kIntlRequirement.none;
-      return;
-    }
-    // i18n enabled
-    if (process.config.variables.icu_small) {
-      this.currentIntl = kIntlRequirement.small;
-    } else {
-      this.currentIntl = kIntlRequirement.full;
-    }
-    // Not using common.hasCrypto because of the global leak checks
-    this.hasCrypto = Boolean(process.versions.openssl) &&
-      !process.env.NODE_SKIP_CRYPTO;
-
-    // Not using common.hasInspector because of the global leak checks
-    this.hasInspector = Boolean(process.features.inspector);
-  }
-
-  /**
-   * @param {Set} requires
-   * @returns {string|false} The config that the build is lacking, or false
-   */
-  isLacking(requires) {
-    const current = this.currentIntl;
-    if (requires.has('full-icu') && current !== kIntlRequirement.full) {
-      return 'full-icu';
-    }
-    if (requires.has('small-icu') && current < kIntlRequirement.small) {
-      return 'small-icu';
-    }
-    if (requires.has('crypto') && !this.hasCrypto) {
-      return 'crypto';
-    }
-    if (requires.has('inspector') && !this.hasInspector) {
-      return 'inspector';
-    }
-    return false;
-  }
-}
-
-const buildRequirements = new BuildRequirement();
-
 class StatusLoader {
   /**
    * @param {string} path relative path of the WPT subset
    */
-  constructor(path) {
-    this.path = path;
-    this.rules = new StatusRuleSet();
+  constructor(expectationsPath) {
     /** @type {WPTTestSpec[]} */
-    this.specs = [];
+    this.specs = this.grep(expectationsPath).map(file => new WPTTestSpec(file));
+  }
+
+  grep2(path, tree, result) {
+    for (const [k, v] of Object.entries(tree)) {
+      // console.log(path, k, result)
+      let subpath = path + "/" + k;
+      if (v === true) {
+        if (!k.includes(".any.html")) {
+          console.error(subpath);
+        } else {
+          result.push(subpath);
+        }
+      } else {
+        this.grep2(subpath, v, result);
+      }
+    }
   }
 
   /**
-   * Grep for all .*.js file recursively in a directory.
-   * @param {string} dir
+   * Build the list of tests from a tree-shaped JSON file
+   * @param {string} expectationsPath
    * @returns {any[]}
    */
-  grep(dir) {
+  grep(expectationsPath) {
+    let tests = JSON.parse(fs.readFileSync(expectationsPath, 'utf8'));
     let result = [];
-    const list = fs.readdirSync(dir);
-    for (const file of list) {
-      const filepath = path.join(dir, file);
-      const stat = fs.statSync(filepath);
-      if (stat.isDirectory()) {
-        const list = this.grep(filepath);
-        result = result.concat(list);
-      } else {
-        if (!(/\.\w+\.js$/.test(filepath))) {
-          continue;
-        }
-        result.push(filepath);
-      }
-    }
+    this.grep2("", tests, result);
     return result;
-  }
-
-  load() {
-    const dir = path.join(__dirname, '..', 'wpt');
-    let statusFile = path.join(dir, 'status', `${this.path}.json`);
-    let result;
-
-    if (fs.existsSync(statusFile)) {
-      result = JSON.parse(fs.readFileSync(statusFile, 'utf8'));
-    } else {
-      statusFile = path.join(dir, 'status', `${this.path}.cjs`);
-      result = require(statusFile);
-    }
-
-    this.rules.addRules(result);
-
-    const subDir = fixtures.path('wpt', this.path);
-    const list = this.grep(subDir);
-    for (const file of list) {
-      const relativePath = path.relative(subDir, file);
-      const match = this.rules.match(relativePath);
-      this.specs.push(...WPTTestSpec.from(this.path, relativePath, match));
-    }
   }
 }
 
@@ -533,7 +367,7 @@ const limit = (concurrency) => {
 };
 
 class WPTRunner {
-  constructor(path, { concurrency = os.availableParallelism() - 1 || 1 } = {}) {
+  constructor(expectationsPath, { concurrency = os.availableParallelism() - 1 || 1 } = {}) {
     // RISC-V has very limited virtual address space in the currently common
     // sv39 mode, in which we can only create a very limited number of wasm
     // memories(27 from a fresh node repl). Limit the concurrency to avoid
@@ -542,16 +376,14 @@ class WPTRunner {
       concurrency = Math.min(10, concurrency);
     }
 
-    this.path = path;
-    this.resource = new ResourceLoader(path);
+    this.resource = new ResourceLoader();
     this.concurrency = concurrency;
 
     this.flags = [];
     this.globalThisInitScripts = [];
     this.initScript = null;
 
-    this.status = new StatusLoader(path);
-    this.status.load();
+    this.status = new StatusLoader(expectationsPath);
     this.specs = new Set(this.status.specs);
 
     this.results = {};
@@ -560,7 +392,7 @@ class WPTRunner {
     this.unexpectedFailures = [];
 
     if (process.env.WPT_REPORT != null) {
-      this.report = new WPTReport(path);
+      this.report = new WPTReport();
     }
   }
 
@@ -593,11 +425,11 @@ class WPTRunner {
    * @returns {string}
    */
   fullInitScript(spec) {
-    const url = new URL(`/${spec.getRelativePath().replace(/\.js$/, '.html')}${spec.variant}`, 'http://wpt');
+    // const url = new URL(`/${spec.getRelativePath().replace(/\.js$/, '.html')}${spec.variant}`, 'http://wpt');
     const title = spec.getMeta().title;
     let { initScript } = this;
 
-    initScript = `${initScript}\n\n//===\nglobalThis.location = new URL("${url.href}");`;
+    // initScript = `${initScript}\n\n//===\nglobalThis.location = new URL("${url.href}");`;
 
     if (title) {
       initScript = `${initScript}\n\n//===\nglobalThis.META_TITLE = "${title}";`;
@@ -616,30 +448,6 @@ class WPTRunner {
     return `${globalThisInitScript}\n\n//===\n${initScript}`;
   }
 
-  /**
-   * Pretend the runner is run in `name`'s environment (globalThis).
-   * @param {'Window'} name
-   * @see {@link https://github.com/nodejs/node/blob/24673ace8ae196bd1c6d4676507d6e8c94cf0b90/test/fixtures/wpt/resources/idlharness.js#L654-L671}
-   */
-  pretendGlobalThisAs(name) {
-    switch (name) {
-      case 'Window': {
-        this.globalThisInitScripts.push('globalThis.Window = Object.getPrototypeOf(globalThis).constructor;');
-        break;
-      }
-
-      // TODO(XadillaX): implement `ServiceWorkerGlobalScope`,
-      // `DedicateWorkerGlobalScope`, etc.
-      //
-      // e.g. `ServiceWorkerGlobalScope` should implement dummy
-      // `addEventListener` and so on.
-
-      default: throw new Error(`Invalid globalThis type ${name}.`);
-    }
-  }
-
-  // TODO(joyeecheung): work with the upstream to port more tests in .html
-  // to .js.
   async runJsTests() {
     const queue = this.buildQueue();
 
@@ -650,14 +458,15 @@ class WPTRunner {
       const meta = spec.getMeta(content);
 
       const absolutePath = spec.getAbsolutePath();
-      const relativePath = spec.getRelativePath();
-      const harnessPath = fixtures.path('wpt', 'resources', 'testharness.js');
+      // const relativePath = spec.getRelativePath();
+      const harnessPath = path.join(wptpath, 'resources', 'testharness.js');
 
       // Scripts specified with the `// META: script=` header
       const scriptsToRun = meta.script?.map((script) => {
         const obj = {
-          filename: this.resource.toRealFilePath(relativePath, script),
-          code: this.resource.read(relativePath, script),
+          // FIXME
+          // filename: this.resource.toRealFilePath(relativePath, script),
+          // code: this.resource.read(relativePath, script),
         };
         this.scriptsModifier?.(obj);
         return obj;
@@ -674,7 +483,7 @@ class WPTRunner {
         const worker = new Worker(workerPath, {
           execArgv: this.flags,
           workerData: {
-            testRelativePath: relativePath,
+            // testRelativePath: relativePath,
             wptRunner: __filename,
             wptPath: this.path,
             initScript: this.fullInitScript(spec),
@@ -755,38 +564,6 @@ class WPTRunner {
         if (item.fail?.unexpected) {
           failures.push(key);
         }
-        if (item.fail?.expected) {
-          expectedFailures++;
-        }
-        if (item.skip) {
-          skipped++;
-        }
-      }
-
-      const unexpectedPasses = [];
-      for (const specs of queue) {
-        const key = specs.filename;
-
-        // File has no expected failures
-        if (!specs.failedTests.length) {
-          continue;
-        }
-
-        // File was (maybe even conditionally) skipped
-        if (this.results[key]?.skip) {
-          continue;
-        }
-
-        // Full check: every expected to fail test is present
-        if (specs.failedTests.some((expectedToFail) => {
-          if (specs.flakyTests.includes(expectedToFail)) {
-            return false;
-          }
-          return this.results[key]?.fail?.expected?.includes(expectedToFail) !== true;
-        })) {
-          unexpectedPasses.push(key);
-          continue;
-        }
       }
 
       // Write the report on clean exit. The report is also written
@@ -798,22 +575,7 @@ class WPTRunner {
       const total = ran + skipped;
       const passed = ran - expectedFailures - failures.length;
       console.log('');
-      console.log(`Ran ${ran}/${total} tests, ${skipped} skipped,`,
-                  `${passed} passed, ${expectedFailures} expected failures,`,
-                  `${failures.length} unexpected failures,`,
-                  `${unexpectedPasses.length} unexpected passes`);
-      if (failures.length > 0) {
-        const file = path.join('test', 'wpt', 'status', `${this.path}.json`);
-        throw new Error(
-          `Found ${failures.length} unexpected failures. ` +
-          `Consider updating ${file} for these files:\n${failures.join('\n')}`);
-      }
-      if (unexpectedPasses.length > 0) {
-        const file = path.join('test', 'wpt', 'status', `${this.path}.json`);
-        throw new Error(
-          `Found ${unexpectedPasses.length} unexpected passes. ` +
-          `Consider updating ${file} for these files:\n${unexpectedPasses.join('\n')}`);
-      }
+      console.log(`Ran ${ran}/${total} tests, ${passed} passed, ${failures.length} failures`);
     });
   }
 
@@ -911,12 +673,7 @@ class WPTRunner {
   }
 
   fail(spec, test, status, reportResult) {
-    const expected = spec.failedTests.includes(test.name);
-    if (expected) {
-      console.log(`[EXPECTED_FAILURE][${status.toUpperCase()}] ${test.name}`);
-    } else {
-      console.log(`[UNEXPECTED_FAILURE][${status.toUpperCase()}] ${test.name}`);
-    }
+    console.log(`[FAILURE][${status.toUpperCase()}] ${test.name}`);
     if (status === kFail || status === kUncaught) {
       console.log(test.message);
       console.log(test.stack);
@@ -935,15 +692,6 @@ class WPTRunner {
     });
   }
 
-  skip(spec, reasons) {
-    const joinedReasons = reasons.join('; ');
-    console.log(`[SKIPPED] ${spec.filename}${spec.variant}: ${joinedReasons}`);
-    this.addTestResult(spec, {
-      status: kSkip,
-      reason: joinedReasons,
-    });
-  }
-
   buildQueue() {
     const queue = [];
     let argFilename;
@@ -956,17 +704,6 @@ class WPTRunner {
         if (spec.filename === argFilename && (!argVariant || spec.variant.substring(1) === argVariant)) {
           queue.push(spec);
         }
-        continue;
-      }
-
-      if (spec.skipReasons.length > 0) {
-        this.skip(spec, spec.skipReasons);
-        continue;
-      }
-
-      const lackingSupport = buildRequirements.isLacking(spec.requires);
-      if (lackingSupport) {
-        this.skip(spec, [ `requires ${lackingSupport}` ]);
         continue;
       }
 
@@ -985,8 +722,6 @@ class WPTRunner {
   }
 }
 
-module.exports = {
-  harness: harnessMock,
-  ResourceLoader,
-  WPTRunner,
-};
+const runner = new WPTRunner(path.join(__dirname, '..', 'wpt', 'expectation2.json'));
+
+runner.runJsTests();
