@@ -65,8 +65,14 @@ add_completion_callback((_, status) => {
 });
 
 for (const scriptToRun of workerData.scriptsToRun) {
-  runInThisContext(scriptToRun.code, {
-    filename: scriptToRun.filename,
-    importModuleDynamically: USE_MAIN_CONTEXT_DEFAULT_LOADER,
-  });
+  try {
+    runInThisContext(scriptToRun.code, {
+      filename: scriptToRun.filename,
+      importModuleDynamically: USE_MAIN_CONTEXT_DEFAULT_LOADER,
+    });
+  } catch (e) {
+    console.log(scriptToRun.filename)
+    console.log(scriptToRun.code)
+    throw e
+  }
 }

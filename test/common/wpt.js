@@ -413,14 +413,6 @@ class WPTRunner {
   }
 
   /**
-   * Set the scripts modifier for each script.
-   * @param {(meta: { code: string, filename: string }) => void} modifier
-   */
-  setScriptModifier(modifier) {
-    this.scriptsModifier = modifier;
-  }
-
-  /**
    * @param {WPTTestSpec} spec
    * @returns {string}
    */
@@ -461,22 +453,23 @@ class WPTRunner {
       // const relativePath = spec.getRelativePath();
       const harnessPath = path.join(wptpath, 'resources', 'testharness.js');
 
+      const testPath = new URL(spec.filename, "http://web-platform.test:8000");
       // Scripts specified with the `// META: script=` header
-      const scriptsToRun = meta.script?.map((script) => {
+      const scriptsToRun = meta.script ? (await Promise.all(meta.script.map(async (script) => {
+        const path = new URL(script, testPath);
+        const resource = await fetch(path);
+        const data = await resource.text();
         const obj = {
-          // FIXME
-          // filename: this.resource.toRealFilePath(relativePath, script),
-          // code: this.resource.read(relativePath, script),
+          code: data,
+          filename: path.toString(),
         };
-        this.scriptsModifier?.(obj);
         return obj;
-      }) ?? [];
+      }))) : [];
       // The actual test
       const obj = {
         code: content,
         filename: absolutePath,
       };
-      this.scriptsModifier?.(obj);
       scriptsToRun.push(obj);
 
       run(async () => {
@@ -686,7 +679,7 @@ class WPTRunner {
 
     this.addTestResult(spec, {
       name: test.name,
-      expected,
+      //expected,
       status: kFail,
       reason: test.message || status,
     });
