@@ -14,6 +14,57 @@ const workerPath = path.join(__dirname, 'wpt/worker.js');
 
 const wptpath = path.join(__dirname, '..', '..', '..', '..', 'tests', 'web-platform-tests');
 
+async function fetchText(url) {
+  const response = await fetch(url);
+  return await response.text();
+}
+
+const runtime = process.argv[2];
+
+async function runTest(content, url) {
+  // console.log(`Starting test ${url}`);
+
+  const tempFilePath = await Deno.makeTempFile();
+  // console.log("Temp file path:", tempFilePath);
+  await Deno.writeTextFile(tempFilePath, content);
+  // const data = await Deno.readTextFile(tempFilePath);
+  // console.log("Temp file data:", data);
+  const command = new Deno.Command(runtime, {
+    args: [tempFilePath],
+  });
+
+  // create subprocess and collect output
+  const { code, stdout, stderr } = await command.output();
+  const stdoutT = new TextDecoder().decode(stdout);
+  const results = stdoutT.split("\n").filter(line => line).map(line => {
+    try { return JSON.parse(line) }
+    catch (e) {
+      // console.log(url)
+      // console.log("------------------------------------------------")
+      // console.log(stdoutT)
+      // console.log("------------------------------------------------")
+      // throw e;
+      // Note that tests can run `console.log`
+      return undefined;
+    }
+  }).filter(line => line);
+
+  // console.assert(code === 0);
+  // console.log();
+  // console.log();
+  if (code === 0) {
+    // await Deno.remove(tempFilePath);
+  }
+  // console.log(`Finishing test ${url}`);
+  // console.log(results)
+  return {
+    code,
+    results,
+    stderr: new TextDecoder().decode(stderr),
+    path: tempFilePath,
+  }
+}
+
 function getBrowserProperties() {
   const { node: version } = process.versions; // e.g. 18.13.0, 20.0.0-nightly202302078e6e215481
   const release = /^\d+\.\d+\.\d+$/.test(version);
@@ -108,7 +159,7 @@ class WPTReport {
    * @returns {ReportResult}
    */
   getResult(spec) {
-    const name = `/${spec.getRelativePath()}${spec.variant}`;
+    const name = `/${spec.url}`;
     if (this.results.has(name)) {
       return this.results.get(name);
     }
@@ -237,41 +288,22 @@ class WPTTestSpec {
   #content;
 
   /**
-   * @param {string} mod name of the WPT module, e.g.
-   *   'html/webappapis/microtask-queuing'
    * @param {string} filename path of the test, relative to mod, e.g.
-   *   'test.any.js'
-   * @param {string} variant test file variant
+   *   'html/webappapis/microtask-queuing/test.any.html' (TODO)
    */
-  constructor(filename, variant = '') {
-    // this.module = mod;
+  constructor(filename) {
     // FIXME do elsewhere
     filename = filename.replace(".any.html", ".any.js");
     this.filename = filename;
-    console.log(`this.filename = ${filename} (${typeof filename})`);
-    this.variant = variant;
-  }
-
-  getAbsolutePath() {
-    let filename = this.filename.replace(/\?.*/, "");
-    let res = path.join(wptpath, filename);
-    console.log(`getAbsolutePath => ${res} (this.filename=${this.filename}, filename=${filename})`)
-    return res;
-  }
-
-  /**
-   * @returns {string}
-   */
-  getContent() {
-    this.#content ||= fs.readFileSync(this.getAbsolutePath(), 'utf8');
-    return this.#content;
+    // console.log(`this.filename = ${filename} (${typeof filename})`);
+    this.url = new URL(filename, "http://web-platform.test:8000");
   }
 
   /**
    * @returns {{ script?: string[]; variant?: string[]; [key: string]: string }} parsed META tags of a spec file
    */
-  getMeta() {
-    const matches = this.getContent().match(/\/\/ META: .+/g);
+  static getMeta(content) {
+    const matches = content.match(/\/\/ META: .+/g);
     if (!matches) {
       return {};
     }
@@ -379,10 +411,6 @@ class WPTRunner {
     this.resource = new ResourceLoader();
     this.concurrency = concurrency;
 
-    this.flags = [];
-    this.globalThisInitScripts = [];
-    this.initScript = null;
-
     this.status = new StatusLoader(expectationsPath);
     this.specs = new Set(this.status.specs);
 
@@ -397,47 +425,61 @@ class WPTRunner {
   }
 
   /**
-   * Sets the Node.js flags passed to the worker.
-   * @param {string[]} flags
-   */
-  setFlags(flags) {
-    this.flags = flags;
-  }
-
-  /**
-   * Sets a script to be run in the worker before executing the tests.
-   * @param {string} script
-   */
-  setInitScript(script) {
-    this.initScript = script;
-  }
-
-  /**
    * @param {WPTTestSpec} spec
    * @returns {string}
    */
-  fullInitScript(spec) {
-    // const url = new URL(`/${spec.getRelativePath().replace(/\.js$/, '.html')}${spec.variant}`, 'http://wpt');
-    const title = spec.getMeta().title;
-    let { initScript } = this;
+  fullInitScript(url, title, harness) {
+    let initScript = `
+    function sanitizeUnpairedSurrogates(str) {
+      return str.replace(
+        /([\ud800-\udbff]+)(?![\udc00-\udfff])|(^|[^\ud800-\udbff])([\udc00-\udfff]+)/g,
+        function(_, low, prefix, high) {
+          let output = prefix || '';  // Prefix may be undefined
+          const string = low || high;  // Only one of these alternates can match
+          for (let i = 0; i < string.length; i++) {
+            output += codeUnitStr(string[i]);
+          }
+          return output;
+        });
+    }
 
-    // initScript = `${initScript}\n\n//===\nglobalThis.location = new URL("${url.href}");`;
+    function codeUnitStr(char) {
+      return 'U+' + char.charCodeAt(0).toString(16);
+    }
 
+      globalThis.self = globalThis; //TODO: must be implemented per mca
+      globalThis.location = new URL("${url}");
+      globalThis.GLOBAL = {
+        isWindow() { return false; },
+        isShadowRealm() { return false; },
+      };
+    `;
     if (title) {
-      initScript = `${initScript}\n\n//===\nglobalThis.META_TITLE = "${title}";`;
+      initScript = `${initScript}\nglobalThis.META_TITLE = "${title}";`;
     }
+    initScript += harness
+    initScript += `
+      add_result_callback((result) => {
+        console.log(JSON.stringify({
+          type: 'result',
+          result: {
+            status: result.status,
+            name: result.name,
+            message: result.message,
+            stack: result.stack,
+          },
+        }));
+      });
+      add_completion_callback((_, status) => {
+        //clearTimeout(timeout);
+        console.log(JSON.stringify({
+          type: 'completion',
+          status,
+        }));
+      });
+    `;
 
-    if (this.globalThisInitScripts.length === null) {
-      return initScript;
-    }
-
-    const globalThisInitScript = this.globalThisInitScripts.join('\n\n//===\n');
-
-    if (initScript === null) {
-      return globalThisInitScript;
-    }
-
-    return `${globalThisInitScript}\n\n//===\n${initScript}`;
+    return initScript;
   }
 
   async runJsTests() {
@@ -445,62 +487,95 @@ class WPTRunner {
 
     const run = limit(this.concurrency);
 
+    const harnessPath = "http://web-platform.test:8000/resources/testharness.js";
+    const harness = await fetchText(harnessPath);
     for (const spec of queue) {
-      const content = spec.getContent();
-      const meta = spec.getMeta(content);
+      const testPath = spec.url;
+      const content = await fetchText(testPath);
+      const meta = WPTTestSpec.getMeta(content);
 
-      const absolutePath = spec.getAbsolutePath();
-      // const relativePath = spec.getRelativePath();
-      const harnessPath = path.join(wptpath, 'resources', 'testharness.js');
+      const scriptsToRun = [
+        { filename: "Init script", code: this.fullInitScript(spec.url.href, meta.title, harness) }
+      ];
 
-      const testPath = new URL(spec.filename, "http://web-platform.test:8000");
       // Scripts specified with the `// META: script=` header
-      const scriptsToRun = meta.script ? (await Promise.all(meta.script.map(async (script) => {
-        const path = new URL(script, testPath);
-        const resource = await fetch(path);
-        const data = await resource.text();
-        const obj = {
-          code: data,
-          filename: path.toString(),
-        };
-        return obj;
-      }))) : [];
+      if (meta.script) {
+        const scripts = await Promise.all(meta.script.map(async (script) => {
+          const path = new URL(script, testPath);
+          const data = await fetchText(path);
+          const obj = {
+            code: data,
+            filename: path.toString(),
+          };
+          return obj;
+        }));
+        scriptsToRun.push(...scripts);
+      }
       // The actual test
       const obj = {
         code: content,
-        filename: absolutePath,
+        filename: spec.url.toString(),
       };
       scriptsToRun.push(obj);
+      const script = scriptsToRun.map(({code, filename}) => `// ${filename}\n${code}\n;`).join("\n");
+
 
       run(async () => {
+        const reportResult = this.report?.getResult(spec);
+        this.inProgress.add(spec);
+        let { code, results, stderr, path } = await runTest(script, spec.url);
+        if (code !== 0) {
+          // Generate a subtest failure for visibility.
+          // No need to record this synthetic failure with wpt.fyi.
+          this.fail(
+            spec,
+            {
+              status: NODE_UNCAUGHT,
+              // name: `${err}`,
+              message: stderr,
+              // stack: inspect(err),
+            },
+            kUncaught,
+          );
+          // Mark the whole test as failed in wpt.fyi report.
+          reportResult?.finish('ERROR');
+          this.inProgress.delete(spec);
+          this.report?.write();
+          return;
+        }
+        for (const result of results) {
+          // console.log(result);
+          switch (result.type) {
+            case 'result':
+              this.resultCallback(spec, result.result, reportResult);
+              break;
+            case 'completion':
+              this.completionCallback(spec, result.status, reportResult);
+              break;
+            default:
+              throw new Error(`Unexpected message from worker: ${result.type}`);
+          }
+        }
+        this.inProgress.delete(spec);
+        return;
         const worker = new Worker(workerPath, {
-          execArgv: this.flags,
+          execArgv: [],
           workerData: {
             // testRelativePath: relativePath,
             wptRunner: __filename,
             wptPath: this.path,
-            initScript: this.fullInitScript(spec),
+            initScript: this.fullInitScript(spec.url.href, content),
             harness: {
-              code: fs.readFileSync(harnessPath, 'utf8'),
+              code: harness,
               filename: harnessPath,
             },
-            scriptsToRun,
+            script,
             needsGc: !!meta.script?.find((script) => script === '/common/gc.js'),
           },
         });
-        this.inProgress.add(spec);
         this.workers.set(spec, worker);
 
-        const reportResult = this.report?.getResult(spec);
         worker.on('message', (message) => {
-          switch (message.type) {
-            case 'result':
-              return this.resultCallback(spec, message.result, reportResult);
-            case 'completion':
-              return this.completionCallback(spec, message.status, reportResult);
-            default:
-              throw new Error(`Unexpected message from worker: ${message.type}`);
-          }
         });
 
         worker.on('error', (err) => {
@@ -509,22 +584,6 @@ class WPTRunner {
             // This can happen normally, for example in timers tests.
             return;
           }
-          // Generate a subtest failure for visibility.
-          // No need to record this synthetic failure with wpt.fyi.
-          this.fail(
-            spec,
-            {
-              status: NODE_UNCAUGHT,
-              name: `${err}`,
-              message: err.message,
-              stack: inspect(err),
-            },
-            kUncaught,
-          );
-          // Mark the whole test as failed in wpt.fyi report.
-          reportResult?.finish('ERROR');
-          this.inProgress.delete(spec);
-          this.report?.write();
         });
 
         await events.once(worker, 'exit').catch(() => {});
@@ -636,9 +695,6 @@ class WPTRunner {
     // Write report incrementally so results survive even if the process
     // is killed before the exit handler runs.
     this.report?.write();
-    // Always force termination of the worker. Some tests allocate resources
-    // that would otherwise keep it alive.
-    this.workers.get(spec).terminate();
   }
 
   addTestResult(spec, item) {
@@ -661,7 +717,7 @@ class WPTRunner {
   }
 
   succeed(test, status, reportResult) {
-    console.log(`[${status.toUpperCase()}] ${test.name}`);
+    //console.log(`[${status.toUpperCase()}] ${test.name}`);
     reportResult?.addSubtest(test.name, 'PASS');
   }
 
@@ -672,7 +728,7 @@ class WPTRunner {
       console.log(test.stack);
     }
     const command = `${process.execPath} ${process.execArgv}` +
-                    ` ${require.main?.filename} '${spec.filename}${spec.variant}'`;
+                    ` ${require.main?.filename} '${spec.filename}'`; // TODO
     console.log(`Command: ${command}\n`);
 
     reportResult?.addSubtest(test.name, 'FAIL', test.message);
@@ -689,18 +745,18 @@ class WPTRunner {
     const queue = [];
     let argFilename;
     let argVariant;
-    if (process.argv[2]) {
-      ([argFilename, argVariant = ''] = process.argv[2].split('?'));
+    if (process.argv[3]) {
+      ([argFilename, argVariant = ''] = process.argv[3].split('?'));
     }
     for (const spec of this.specs) {
-      if (argFilename) {
-        if (spec.filename === argFilename && (!argVariant || spec.variant.substring(1) === argVariant)) {
-          queue.push(spec);
-        }
+      if (!argFilename) {
+        queue.push(spec);
         continue;
       }
-
-      queue.push(spec);
+      let [filename, variant = ''] = spec.filename.split('?');
+      if (filename === argFilename && (!argVariant || variant === argVariant)) {
+        queue.push(spec);
+      }
     }
 
     // If the tests are run as `node test/wpt/test-something.js subset.any.js`,
@@ -708,7 +764,7 @@ class WPTRunner {
     // If the tests are run as `node test/wpt/test-something.js 'subset.any.js?1-10'`,
     // only the `?1-10` variant of `subset.any.js` will be run by the runner.
     if (argFilename && queue.length === 0) {
-      throw new Error(`${process.argv[2]} not found!`);
+      throw new Error(`${process.argv[3]} not found!`);
     }
 
     return queue;

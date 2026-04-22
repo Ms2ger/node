@@ -15,12 +15,12 @@ if (workerData.needsGc) {
   globalThis.gc = runInNewContext('gc');
 }
 
-globalThis.self = global;
-globalThis.GLOBAL = {
-  isWindow() { return false; },
-  isShadowRealm() { return false; },
-};
-globalThis.require = require;
+// globalThis.self = global;
+// globalThis.GLOBAL = {
+//   isWindow() { return false; },
+//   isShadowRealm() { return false; },
+// };
+// globalThis.require = require;
 
 
 if (workerData.initScript) {
